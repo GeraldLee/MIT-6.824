@@ -118,7 +118,7 @@ func (cfg *config) crash1(i int) {
 //
 func (cfg *config) start1(i int) {
 	cfg.crash1(i)
-
+	fmt.Println("start 1")
 	// a fresh set of outgoing ClientEnd names.
 	// so that old crashed instance's ClientEnds can't send.
 	cfg.endnames[i] = make([]string, cfg.n)

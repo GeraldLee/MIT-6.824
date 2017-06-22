@@ -58,6 +58,7 @@ import "log"
 import "strings"
 import "math/rand"
 import "time"
+import "fmt"
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -396,6 +397,7 @@ func MakeService(rcvr interface{}) *Service {
 	svc.typ = reflect.TypeOf(rcvr)
 	svc.rcvr = reflect.ValueOf(rcvr)
 	svc.name = reflect.Indirect(svc.rcvr).Type().Name()
+	fmt.Println("svc.name ", svc.name)
 	svc.methods = map[string]reflect.Method{}
 
 	for m := 0; m < svc.typ.NumMethod(); m++ {
