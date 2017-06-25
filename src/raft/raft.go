@@ -195,6 +195,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.currentTerm = args.Term
 	reply.Success = true
 	reply.Term = rf.currentTerm
+	rf.state = STATE_FOLLOWER
 	return
 }
 
@@ -270,6 +271,7 @@ func (rf *Raft) BroadCastRequestVote() {
 				//fmt.Printf("%v RequestVote to %v\n", rf.me, i)
 				rf.sendRequestVote(i, &args, &reply)
 				fmt.Printf("get vote reply term %v votegranted %v\n", reply.Term, reply.VoteGranted)
+				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.state = STATE_FOLLOWER
@@ -279,12 +281,12 @@ func (rf *Raft) BroadCastRequestVote() {
 				if reply.VoteGranted {
 					rf.voteCount++
 					fmt.Printf("%v get voted and current vote number is %v\n", rf.me, rf.voteCount)
-
 					if rf.state == STATE_CANDIDATE && rf.voteCount > len(rf.peers)/2 {
 						rf.state = STATE_FOLLOWER
 						rf.chanLeader <- true
 					}
 				}
+				rf.mu.Unlock()
 			}(i)
 		}
 	}
