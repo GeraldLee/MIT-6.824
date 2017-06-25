@@ -166,9 +166,36 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-func (rf *Raft) HeartBeat(args *RequestVoteArgs, reply *RequestVoteReply) {
-	fmt.Printf("raft %v get hb", rf.me)
+type AppendEntriesArgs struct {
+	// Your data here.
+	Term         int
+	LeaderId     int
+	PrevLogTerm  int
+	PrevLogIndex int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+// Reply of AppendEntries
+type AppendEntriesReply struct {
+	// Your data here.
+	Term      int
+	Success   bool
+	NextIndex int
+}
+
+// AppendEntries handler
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//fmt.Printf("raft %v get hb", rf.me)
 	rf.chanHeartbeat <- true
+	reply.Success = false
+	if args.Term < rf.currentTerm {
+		return
+	}
+	rf.currentTerm = args.Term
+	reply.Success = true
+	reply.Term = rf.currentTerm
+	return
 }
 
 //
@@ -179,10 +206,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.VoteGranted = false
+	// 1. Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		return
 	}
+
+	// if votedfor is null or candidateId, and candidate's
+	// log is at leaset as up-to-date as receiver's log, grant vote
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = STATE_FOLLOWER
@@ -201,7 +232,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLogTerm == term && args.LastLogIndex >= index { // at least up to date
 		uptoDate = true
 	}
-
+	// if votedfor is null or candidateId
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptoDate {
 		rf.chanGrantVote <- true
 		fmt.Printf("%v become FOLLOWER and voted for %v\n", rf.me, args.CandidateID)
@@ -210,22 +241,51 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateID
 	}
 }
-func (rf *Raft) BroadCastHeartBeat(args *RequestVoteArgs, reply *RequestVoteReply) {
+
+func (rf *Raft) BroadCastAppendEntries() {
+	var args AppendEntriesArgs
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	var reply AppendEntriesReply
 	for i := range rf.peers {
 		if i != rf.me && rf.state == STATE_LEADER {
-			fmt.Printf("send hb to %v\n", i)
-			rf.sendHB(i, args, reply)
+			go func(i int) {
+				//fmt.Printf("send hb to %v\n", i)
+				rf.sendAppendEntries(i, &args, &reply)
+			}(i)
 		}
 	}
 }
 
-func (rf *Raft) BroadCastRequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) BroadCastRequestVote() {
+	var args RequestVoteArgs
+	args.Term = rf.currentTerm
+	args.CandidateID = rf.me
+	args.LastLogTerm = rf.getLastTerm()
+	args.LastLogIndex = rf.getLastIndex()
+	var reply RequestVoteReply
 	for i := range rf.peers {
 		if i != rf.me && rf.state == STATE_CANDIDATE {
-			//go func(i int) {
-			//fmt.Printf("%v RequestVote to %v\n", rf.me, i)
-			rf.sendRequestVote(i, args, reply)
-			//}(i)
+			go func(i int) {
+				//fmt.Printf("%v RequestVote to %v\n", rf.me, i)
+				rf.sendRequestVote(i, &args, &reply)
+				fmt.Printf("get vote reply term %v votegranted %v\n", reply.Term, reply.VoteGranted)
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.state = STATE_FOLLOWER
+					rf.votedFor = -1
+					rf.persist()
+				}
+				if reply.VoteGranted {
+					rf.voteCount++
+					fmt.Printf("%v get voted and current vote number is %v\n", rf.me, rf.voteCount)
+
+					if rf.state == STATE_CANDIDATE && rf.voteCount > len(rf.peers)/2 {
+						rf.state = STATE_FOLLOWER
+						rf.chanLeader <- true
+					}
+				}
+			}(i)
 		}
 	}
 }
@@ -264,8 +324,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendHB(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.HeartBeat", args, reply)
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -334,12 +394,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for {
 			switch rf.state {
 			case STATE_FOLLOWER:
-				fmt.Printf("%v is FOLLOWER\n", rf.me)
 				select {
 				case <-rf.chanHeartbeat:
 				case <-rf.chanGrantVote:
 				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
-					fmt.Printf("%v convert to CANDIDATE\n", rf.me)
+					fmt.Printf("%v convert from FOLLOWER to CANDIDATE\n", rf.me)
 					rf.state = STATE_CANDIDATE
 				}
 			case STATE_CANDIDATE:
@@ -349,30 +408,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				//vote for self
 				rf.votedFor = rf.me
 				rf.voteCount = 1
-				var args RequestVoteArgs
-				args.Term = rf.currentTerm
-				args.CandidateID = rf.me
-				args.LastLogTerm = rf.getLastTerm()
-				args.LastLogIndex = rf.getLastIndex()
-				var reply RequestVoteReply
 				rf.mu.Unlock()
-				rf.BroadCastRequestVote(&args, &reply)
-				fmt.Printf("get reply %v %v", reply.Term, reply.VoteGranted)
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.state = STATE_FOLLOWER
-					rf.votedFor = -1
-					rf.persist()
-				}
-				if reply.VoteGranted {
-					rf.voteCount++
-					fmt.Printf("%v get voted and current vote number is %v\n", rf.me, rf.voteCount)
-
-					if rf.state == STATE_CANDIDATE && rf.voteCount > len(rf.peers)/2 {
-						rf.state = STATE_FOLLOWER
-						rf.chanLeader <- true
-					}
-				}
+				rf.BroadCastRequestVote()
 				select {
 				// reset timer
 				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
@@ -382,9 +419,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.mu.Lock()
 					fmt.Printf("%v convert to LEADER\n", rf.me)
 					rf.state = STATE_LEADER
-					var argshb RequestVoteArgs
-					var replyhb RequestVoteReply
-					rf.BroadCastHeartBeat(&argshb, &replyhb)
+					rf.BroadCastAppendEntries()
 					rf.nextIndex = make([]int, len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers))
 					for i := range rf.peers {
@@ -395,9 +430,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 
 			case STATE_LEADER:
-				var argshb RequestVoteArgs
-				var replyhb RequestVoteReply
-				rf.BroadCastHeartBeat(&argshb, &replyhb)
+				rf.BroadCastAppendEntries()
 				time.Sleep(HBINTERVAL)
 			}
 		}
