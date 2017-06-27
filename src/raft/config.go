@@ -151,8 +151,10 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
+			fmt.Printf("get apply message %v \n", m.Command)
 			err_msg := ""
 			if m.UseSnapshot {
+				fmt.Printf("SnapShot \n")
 				// ignore the snapshot
 			} else if v, ok := (m.Command).(int); ok {
 				cfg.mu.Lock()
@@ -164,6 +166,7 @@ func (cfg *config) start1(i int) {
 					}
 				}
 				_, prevok := cfg.logs[i][m.Index-1]
+				fmt.Printf("set cfg.logs[%v][%v] = %v\n", i, m.Index, v)
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
 
@@ -333,6 +336,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
+		//fmt.Printf("rafts %v logs cmd %v ok %v\n", i, cmd1, ok)
 		cfg.mu.Unlock()
 
 		if ok {
@@ -408,7 +412,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 				}
 			}
 		}
-
+		fmt.Printf("find the leader %v\n", index)
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.

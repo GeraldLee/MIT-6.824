@@ -44,6 +44,7 @@ type ApplyMsg struct {
 type LogEntry struct {
 	LogIndex int
 	LogTerm  int
+	Command  interface{}
 }
 
 // raft state
@@ -187,14 +188,26 @@ type AppendEntriesReply struct {
 // AppendEntries handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	//fmt.Printf("raft %v get hb", rf.me)
-	rf.chanHeartbeat <- true
 	reply.Success = false
 	if args.Term < rf.currentTerm {
 		return
 	}
+
+	if args.Entries == nil {
+		rf.chanHeartbeat <- true
+		//fmt.Printf("raft %v get a HeartBeat\n", rf.me)
+		reply.Success = true
+		return
+	}
+
 	rf.currentTerm = args.Term
 	reply.Success = true
 	reply.Term = rf.currentTerm
+
+	for _, log := range args.Entries {
+		var newapplymsg ApplyMsg = ApplyMsg{log.LogIndex, log.Command, false, nil}
+		rf.chanApply <- newapplymsg
+	}
 	rf.state = STATE_FOLLOWER
 	return
 }
@@ -243,11 +256,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-func (rf *Raft) BroadCastAppendEntries() {
+func (rf *Raft) BroadCastAppendEntries(entries []LogEntry) {
 	var args AppendEntriesArgs
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
+	args.Entries = entries
 	var reply AppendEntriesReply
+	for _, log := range entries {
+		var newapplymsg ApplyMsg = ApplyMsg{log.LogIndex, log.Command, false, nil}
+		rf.chanApply <- newapplymsg
+	}
 	for i := range rf.peers {
 		if i != rf.me && rf.state == STATE_LEADER {
 			go func(i int) {
@@ -345,11 +363,27 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	fmt.Printf("start \n")
 	index := -1
 	term := -1
 	isLeader := true
-
 	// Your code here (2B).
+	var lel []LogEntry
+	var le LogEntry
+	le.LogIndex = rf.lastApplied + 1
+	le.LogTerm = rf.currentTerm
+	le.Command = command
+	lel = append(lel, le)
+	if rf.state == STATE_LEADER {
+		index = le.LogIndex
+		term = le.LogTerm
+		isLeader = true
+		rf.lastApplied = le.LogIndex
+		fmt.Printf("Send AppendEntrites form %v with Command %v Index %v Term %v\n", rf.me, command, index, term)
+		rf.BroadCastAppendEntries(lel)
+	} else {
+		isLeader = false
+	}
 
 	return index, term, isLeader
 }
@@ -421,7 +455,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.mu.Lock()
 					fmt.Printf("%v convert to LEADER\n", rf.me)
 					rf.state = STATE_LEADER
-					rf.BroadCastAppendEntries()
+					var le []LogEntry
+					rf.BroadCastAppendEntries(le)
 					rf.nextIndex = make([]int, len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers))
 					for i := range rf.peers {
@@ -432,7 +467,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 
 			case STATE_LEADER:
-				rf.BroadCastAppendEntries()
+				var le []LogEntry
+				rf.BroadCastAppendEntries(le)
 				time.Sleep(HBINTERVAL)
 			}
 		}
