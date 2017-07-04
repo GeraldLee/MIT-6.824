@@ -42,9 +42,10 @@ type ApplyMsg struct {
 
 // log entry
 type LogEntry struct {
-	LogIndex int
-	LogTerm  int
-	Command  interface{}
+	LogIndex  int
+	LogTerm   int
+	Command   interface{}
+	replicate int
 }
 
 // raft state
@@ -71,6 +72,7 @@ type Raft struct {
 	//channel
 	state         int
 	voteCount     int
+	rejecCount    int
 	chanCommit    chan bool
 	chanHeartbeat chan bool
 	chanGrantVote chan bool
@@ -108,6 +110,9 @@ func (rf *Raft) getLastIndex() int {
 	return rf.log[len(rf.log)-1].LogIndex
 }
 func (rf *Raft) getLastTerm() int {
+	if len(rf.log) == 0 {
+		return 0
+	}
 	return rf.log[len(rf.log)-1].LogTerm
 }
 func (rf *Raft) IsLeader() bool {
@@ -185,30 +190,58 @@ type AppendEntriesReply struct {
 	NextIndex int
 }
 
+func min(first int, second int) int {
+	if first < second {
+		return first
+	}
+	return second
+}
+
 // AppendEntries handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//fmt.Printf("raft %v get hb", rf.me)
+	fmt.Printf("raft %v get AppendEntries\n", rf.me)
 	reply.Success = false
+	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
+		fmt.Printf("raft %v args.Term %v  < rf.currentTerm %v return\n", rf.me, args.Term, rf.currentTerm)
 		return
 	}
 
+	if rf.log[len(rf.log)-1].LogIndex != args.PrevLogIndex || rf.log[len(rf.log)-1].LogTerm != args.PrevLogTerm {
+		fmt.Printf("raft %v Retrun false until prev log index match the request\n", rf.me)
+		reply.Success = false
+		return
+	}
+	rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+	fmt.Printf("raft %v lassApplied %v commitIndex %v\n", rf.me, rf.lastApplied, rf.commitIndex)
+	if rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		fmt.Printf("raft %v Apply index %v\n", rf.me, rf.lastApplied)
+		fmt.Printf("raft %v current log is %v\n", rf.me, rf.log)
+		var log = rf.log[rf.lastApplied]
+		var newapplymsg = ApplyMsg{log.LogIndex, log.Command, false, nil}
+		rf.chanApply <- newapplymsg
+	}
+
+	// Entries is empty means it's a heartbeat
 	if args.Entries == nil {
 		rf.chanHeartbeat <- true
+		fmt.Printf("raft %v commit %v from heartbeat \n", rf.me, args.LeaderCommit)
 		//fmt.Printf("raft %v get a HeartBeat\n", rf.me)
 		reply.Success = true
 		return
 	}
+	fmt.Printf("raft %v get a AppendEntry %v with term %v\n", rf.me, args.Entries, args.Term)
 
-	rf.currentTerm = args.Term
 	reply.Success = true
-	reply.Term = rf.currentTerm
-
+	reply.Term = args.Term
+	rf.currentTerm = args.Term
 	for _, log := range args.Entries {
-		var newapplymsg ApplyMsg = ApplyMsg{log.LogIndex, log.Command, false, nil}
-		rf.chanApply <- newapplymsg
+		rf.log = append(rf.log, log)
 	}
 	rf.state = STATE_FOLLOWER
+	rf.chanHeartbeat <- true
+
 	return
 }
 
@@ -232,6 +265,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = STATE_FOLLOWER
 		rf.votedFor = -1
+		fmt.Printf("%v become follower\n", rf.me)
 	}
 	reply.Term = rf.currentTerm
 
@@ -256,39 +290,77 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-func (rf *Raft) BroadCastAppendEntries(entries []LogEntry) {
-	var args AppendEntriesArgs
-	args.Term = rf.currentTerm
-	args.LeaderId = rf.me
-	args.Entries = entries
-	var reply AppendEntriesReply
-	for _, log := range entries {
-		var newapplymsg ApplyMsg = ApplyMsg{log.LogIndex, log.Command, false, nil}
-		rf.chanApply <- newapplymsg
-	}
+func (rf *Raft) BroadCastAppendEntries() {
 	for i := range rf.peers {
+		//fmt.Printf("i is %v\n", i)
 		if i != rf.me && rf.state == STATE_LEADER {
 			go func(i int) {
-				//fmt.Printf("send hb to %v\n", i)
-				rf.sendAppendEntries(i, &args, &reply)
+				var args AppendEntriesArgs
+				var reply AppendEntriesReply
+				args.Term = rf.currentTerm
+				args.LeaderId = rf.me
+				args.LeaderCommit = rf.commitIndex
+				args.PrevLogIndex = rf.nextIndex[i] - 1
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].LogTerm
+				rf.mu.Lock()
+				if rf.getLastIndex() >= rf.nextIndex[i] {
+					args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]])
+				}
+				rf.mu.Unlock()
+				var ok = rf.sendAppendEntries(i, &args, &reply)
+				fmt.Printf("get reply from raft %v Term %v Success %v \n", i, reply.Term, reply.Success)
+				if ok == true {
+					if reply.Success {
+						if len(args.Entries) != 0 {
+							rf.log[rf.nextIndex[i]].replicate += 1
+							if rf.log[rf.nextIndex[i]].replicate >= len(rf.peers)/2 &&
+								rf.commitIndex < rf.nextIndex[i] {
+								rf.commitIndex = rf.nextIndex[i]
+								fmt.Printf("log in index %v is commited\n", rf.commitIndex)
+							}
+							rf.nextIndex[i]++
+							fmt.Printf("raft %v rf.nextIndex[%v] = %v\n", rf.me, i, rf.nextIndex[i])
+						}
+					} else {
+						fmt.Printf("raft %v currentTerm %v reply term %v \n", rf.me, rf.currentTerm, reply.Term)
+						if rf.currentTerm < reply.Term {
+							fmt.Printf("raft %v become Follower due to currentTerm < Term\n", rf.me)
+							rf.state = STATE_FOLLOWER
+							rf.votedFor = -1
+							rf.currentTerm = args.Term
+						}
+
+						if rf.nextIndex[i] > 0 {
+							rf.nextIndex[i]--
+							fmt.Printf("raft %v rf.nextIndex[%v] = %v\n", rf.me, i, rf.nextIndex[i])
+						}
+
+					}
+				}
 			}(i)
 		}
+	}
+	var log = rf.log[rf.getLastIndex()]
+	if log.Command != nil {
+		var newapplymsg = ApplyMsg{log.LogIndex, log.Command, false, nil}
+		rf.chanApply <- newapplymsg
 	}
 }
 
 func (rf *Raft) BroadCastRequestVote() {
-	var args RequestVoteArgs
-	args.Term = rf.currentTerm
-	args.CandidateID = rf.me
-	args.LastLogTerm = rf.getLastTerm()
-	args.LastLogIndex = rf.getLastIndex()
-	var reply RequestVoteReply
+
 	for i := range rf.peers {
 		if i != rf.me && rf.state == STATE_CANDIDATE {
 			go func(i int) {
+				var args RequestVoteArgs
+				args.Term = rf.currentTerm
+				args.CandidateID = rf.me
+				args.LastLogTerm = rf.getLastTerm()
+				args.LastLogIndex = rf.getLastIndex()
+				var reply RequestVoteReply
 				//fmt.Printf("%v RequestVote to %v\n", rf.me, i)
 				rf.sendRequestVote(i, &args, &reply)
-				fmt.Printf("get vote reply term %v votegranted %v\n", reply.Term, reply.VoteGranted)
+				fmt.Printf("raft %v get vote reply term %v votegranted %v\n", rf.me, reply.Term, reply.VoteGranted)
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
@@ -298,11 +370,13 @@ func (rf *Raft) BroadCastRequestVote() {
 				}
 				if reply.VoteGranted {
 					rf.voteCount++
-					fmt.Printf("%v get voted and current vote number is %v\n", rf.me, rf.voteCount)
+					fmt.Printf("raft %v get voted and current vote number is %v\n", rf.me, rf.voteCount)
 					if rf.state == STATE_CANDIDATE && rf.voteCount > len(rf.peers)/2 {
 						rf.state = STATE_FOLLOWER
 						rf.chanLeader <- true
 					}
+				} else {
+					rf.currentTerm = reply.Term
 				}
 				rf.mu.Unlock()
 			}(i)
@@ -345,6 +419,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	fmt.Printf("raft %v send append entries %v\n", rf.me, *args)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -363,24 +438,23 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	fmt.Printf("start \n")
+	//fmt.Printf("start %v\n", command)
 	index := -1
 	term := -1
 	isLeader := true
 	// Your code here (2B).
-	var lel []LogEntry
-	var le LogEntry
-	le.LogIndex = rf.lastApplied + 1
-	le.LogTerm = rf.currentTerm
-	le.Command = command
-	lel = append(lel, le)
+
+	// Save command into it's own log
 	if rf.state == STATE_LEADER {
+		fmt.Printf("rf %v is Leader \n", rf.me)
+		fmt.Printf("getLastIndex %v \n", rf.getLastIndex())
+		var le = LogEntry{rf.getLastIndex() + 1, rf.currentTerm, command, 0}
 		index = le.LogIndex
 		term = le.LogTerm
 		isLeader = true
-		rf.lastApplied = le.LogIndex
+		rf.log = append(rf.log, le)
 		fmt.Printf("Send AppendEntrites form %v with Command %v Index %v Term %v\n", rf.me, command, index, term)
-		rf.BroadCastAppendEntries(lel)
+		rf.BroadCastAppendEntries()
 	} else {
 		isLeader = false
 	}
@@ -426,37 +500,40 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.chanGrantVote = make(chan bool, 100)
 	rf.chanLeader = make(chan bool, 100)
 	rf.chanApply = applyCh
+
 	go func() {
 		for {
 			switch rf.state {
 			case STATE_FOLLOWER:
 				select {
 				case <-rf.chanHeartbeat:
+					//fmt.Printf("FOLLOWER %v get HeartBeat\n", rf.me)
 				case <-rf.chanGrantVote:
 				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
 					fmt.Printf("%v convert from FOLLOWER to CANDIDATE\n", rf.me)
+					rf.currentTerm++
 					rf.state = STATE_CANDIDATE
 				}
 			case STATE_CANDIDATE:
 				rf.mu.Lock()
 				// increment current term
-				rf.currentTerm++
 				//vote for self
 				rf.votedFor = rf.me
 				rf.voteCount = 1
+				rf.rejecCount = 0
 				rf.mu.Unlock()
 				rf.BroadCastRequestVote()
 				select {
 				// reset timer
 				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
+				// become FOLLOWER if receive Heartbeat
 				case <-rf.chanHeartbeat:
 					rf.state = STATE_FOLLOWER
 				case <-rf.chanLeader:
 					rf.mu.Lock()
 					fmt.Printf("%v convert to LEADER\n", rf.me)
 					rf.state = STATE_LEADER
-					var le []LogEntry
-					rf.BroadCastAppendEntries(le)
+					rf.BroadCastAppendEntries()
 					rf.nextIndex = make([]int, len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers))
 					for i := range rf.peers {
@@ -467,8 +544,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 
 			case STATE_LEADER:
-				var le []LogEntry
-				rf.BroadCastAppendEntries(le)
+				rf.BroadCastAppendEntries()
 				time.Sleep(HBINTERVAL)
 			}
 		}

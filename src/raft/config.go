@@ -118,7 +118,7 @@ func (cfg *config) crash1(i int) {
 //
 func (cfg *config) start1(i int) {
 	cfg.crash1(i)
-	fmt.Println("start 1")
+	//fmt.Println("start 1")
 	// a fresh set of outgoing ClientEnd names.
 	// so that old crashed instance's ClientEnds can't send.
 	cfg.endnames[i] = make([]string, cfg.n)
@@ -151,7 +151,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
-			fmt.Printf("get apply message %v \n", m.Command)
+			//fmt.Printf("get apply message %v \n", m.Command)
 			err_msg := ""
 			if m.UseSnapshot {
 				fmt.Printf("SnapShot \n")
@@ -166,7 +166,7 @@ func (cfg *config) start1(i int) {
 					}
 				}
 				_, prevok := cfg.logs[i][m.Index-1]
-				fmt.Printf("set cfg.logs[%v][%v] = %v\n", i, m.Index, v)
+				//fmt.Printf("set cfg.logs[%v][%v] = %v\n", i, m.Index, v)
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
 
@@ -412,7 +412,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 				}
 			}
 		}
-		fmt.Printf("find the leader %v\n", index)
+		//fmt.Printf("find the leader %v\n", index)
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
